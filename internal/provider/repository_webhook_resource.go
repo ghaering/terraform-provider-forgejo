@@ -386,13 +386,20 @@ func (r *repositoryWebhookResource) Read(ctx context.Context, req resource.ReadR
 	}
 
 	// Use Forgejo client to get repository by id
-	rep, diags := getRepositoryByID(
+	rep, found, diags := lookupRepositoryByID(
 		ctx,
 		r.client,
 		data.RepositoryID.ValueInt64(),
 	)
 	resp.Diagnostics.Append(diags...)
 	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	// The repository is gone, so is the webhook. Drop it from state.
+	if !found {
+		resp.State.RemoveResource(ctx)
+
 		return
 	}
 
@@ -411,6 +418,14 @@ func (r *repositoryWebhookResource) Read(ctx context.Context, req resource.ReadR
 		repo.Name.ValueString(),
 		data.WebhookID.ValueInt64(),
 	)
+
+	// Gone. Drop it from state, the next plan creates it again.
+	if isNotFound(res) {
+		resp.State.RemoveResource(ctx)
+
+		return
+	}
+
 	if err != nil {
 		var msg string
 		if res == nil {
@@ -420,22 +435,11 @@ func (r *repositoryWebhookResource) Read(ctx context.Context, req resource.ReadR
 				"status": res.Status,
 			})
 
-			switch res.StatusCode {
-			case 404:
-				msg = fmt.Sprintf(
-					"Repository webhook with owner %s, repo %s and ID %d not found: %s",
-					repo.Owner.String(),
-					repo.Name.String(),
-					data.WebhookID.ValueInt64(),
-					err,
-				)
-			default:
-				msg = fmt.Sprintf(
-					"Unknown error (status %d): %s",
-					res.StatusCode,
-					err,
-				)
-			}
+			msg = fmt.Sprintf(
+				"Unknown error (status %d): %s",
+				res.StatusCode,
+				err,
+			)
 		}
 		resp.Diagnostics.AddError("Unable to read repository webhook", msg)
 
@@ -627,13 +631,18 @@ func (r *repositoryWebhookResource) Delete(ctx context.Context, req resource.Del
 	}
 
 	// Use Forgejo client to get repository by id
-	rep, diags := getRepositoryByID(
+	rep, found, diags := lookupRepositoryByID(
 		ctx,
 		r.client,
 		data.RepositoryID.ValueInt64(),
 	)
 	resp.Diagnostics.Append(diags...)
 	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	// The repository is gone, so is the webhook.
+	if !found {
 		return
 	}
 
@@ -652,6 +661,12 @@ func (r *repositoryWebhookResource) Delete(ctx context.Context, req resource.Del
 		repo.Name.ValueString(),
 		data.WebhookID.ValueInt64(),
 	)
+
+	// Already gone, nothing to delete.
+	if isNotFound(res) {
+		return
+	}
+
 	if err != nil {
 		var msg string
 		if res == nil {
@@ -665,14 +680,6 @@ func (r *repositoryWebhookResource) Delete(ctx context.Context, req resource.Del
 			case 403:
 				msg = fmt.Sprintf(
 					"Repository webhook with owner %s, repo %s and ID %d forbidden: %s",
-					repo.Owner.String(),
-					repo.Name.String(),
-					data.WebhookID.ValueInt64(),
-					err,
-				)
-			case 404:
-				msg = fmt.Sprintf(
-					"Repository webhook with owner %s, repo %s and ID %d not found: %s",
 					repo.Owner.String(),
 					repo.Name.String(),
 					data.WebhookID.ValueInt64(),

@@ -257,7 +257,7 @@ func (r *gpgKeyResource) Schema(_ context.Context, _ resource.SchemaRequest, res
 				Computed:    true,
 				// 6b66d9e: standardize on formatting temporal data in RFC3339 format
 				// PlanModifiers: []planmodifier.String{
-				// 	stringplanmodifier.UseStateForUnknown(),
+				// stringplanmodifier.UseStateForUnknown(),
 				// },
 			},
 			"expires_at": schema.StringAttribute{
@@ -265,7 +265,7 @@ func (r *gpgKeyResource) Schema(_ context.Context, _ resource.SchemaRequest, res
 				Computed:    true,
 				// 6b66d9e: standardize on formatting temporal data in RFC3339 format
 				// PlanModifiers: []planmodifier.String{
-				// 	stringplanmodifier.UseStateForUnknown(),
+				// stringplanmodifier.UseStateForUnknown(),
 				// },
 			},
 			"emails": schema.ListAttribute{
@@ -401,6 +401,13 @@ func (r *gpgKeyResource) Read(ctx context.Context, req resource.ReadRequest, res
 	// Use Forgejo client to get GPG key
 	key, res, err := r.client.GetGPGKey(data.ID.ValueInt64())
 	if err != nil {
+		// Gone. Drop it from state, the next plan creates it again.
+		if isNotFound(res) {
+			resp.State.RemoveResource(ctx)
+
+			return
+		}
+
 		var msg string
 		if res == nil {
 			msg = fmt.Sprintf("Unknown error with nil response: %s", err)
@@ -413,12 +420,6 @@ func (r *gpgKeyResource) Read(ctx context.Context, req resource.ReadRequest, res
 			case 403:
 				msg = fmt.Sprintf(
 					"GPG key with ID %s forbidden: %s",
-					data.ID.String(),
-					err,
-				)
-			case 404:
-				msg = fmt.Sprintf(
-					"GPG key with ID %s not found: %s",
 					data.ID.String(),
 					err,
 				)
@@ -476,6 +477,12 @@ func (r *gpgKeyResource) Delete(ctx context.Context, req resource.DeleteRequest,
 
 	// Use Forgejo client to delete existing GPG key
 	res, err := r.client.DeleteGPGKey(data.ID.ValueInt64())
+
+	// Already gone, nothing to delete.
+	if isNotFound(res) {
+		return
+	}
+
 	if err != nil {
 		var msg string
 		if res == nil {
@@ -489,12 +496,6 @@ func (r *gpgKeyResource) Delete(ctx context.Context, req resource.DeleteRequest,
 			case 403:
 				msg = fmt.Sprintf(
 					"GPG key with ID %s forbidden: %s",
-					data.ID.String(),
-					err,
-				)
-			case 404:
-				msg = fmt.Sprintf(
-					"GPG key with ID %s not found: %s",
 					data.ID.String(),
 					err,
 				)

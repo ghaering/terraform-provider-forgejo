@@ -497,7 +497,7 @@ func (r *branchProtectionResource) Read(ctx context.Context, req resource.ReadRe
 	}
 
 	// Use Forgejo client to get repository
-	rep, diags := getRepositoryByID(
+	rep, found, diags := lookupRepositoryByID(
 		ctx,
 		r.client,
 		data.RepositoryID.ValueInt64(),
@@ -507,11 +507,18 @@ func (r *branchProtectionResource) Read(ctx context.Context, req resource.ReadRe
 		return
 	}
 
+	// The repository is gone, so is the protection. Drop it from state.
+	if !found {
+		resp.State.RemoveResource(ctx)
+
+		return
+	}
+
 	// Map response body to model
 	repo.from(rep)
 
 	// Use Forgejo client to get branch protection
-	protection, diags := r.getBranchProtection(
+	protection, found, diags := r.lookupBranchProtection(
 		ctx,
 		repo.Owner.ValueString(),
 		repo.Name.ValueString(),
@@ -519,6 +526,13 @@ func (r *branchProtectionResource) Read(ctx context.Context, req resource.ReadRe
 	)
 	resp.Diagnostics.Append(diags...)
 	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	// Gone. Drop it from state, the next plan creates it again.
+	if !found {
+		resp.State.RemoveResource(ctx)
+
 		return
 	}
 
@@ -668,13 +682,18 @@ func (r *branchProtectionResource) Delete(ctx context.Context, req resource.Dele
 	}
 
 	// Use Forgejo client to get repository
-	rep, diags := getRepositoryByID(
+	rep, found, diags := lookupRepositoryByID(
 		ctx,
 		r.client,
 		data.RepositoryID.ValueInt64(),
 	)
 	resp.Diagnostics.Append(diags...)
 	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	// The repository is gone, so is the protection.
+	if !found {
 		return
 	}
 
@@ -694,6 +713,12 @@ func (r *branchProtectionResource) Delete(ctx context.Context, req resource.Dele
 		repo.Name.ValueString(),
 		data.BranchName.ValueString(),
 	)
+
+	// Already gone, nothing to delete.
+	if isNotFound(res) {
+		return
+	}
+
 	if err != nil {
 		var msg string
 		if res == nil {
@@ -703,22 +728,11 @@ func (r *branchProtectionResource) Delete(ctx context.Context, req resource.Dele
 				"status": res.Status,
 			})
 
-			switch res.StatusCode {
-			case 404:
-				msg = fmt.Sprintf(
-					"Protection for branch %s in repository with owner %s and name %s not found: %s",
-					data.BranchName.String(),
-					repo.Owner.String(),
-					repo.Name.String(),
-					err,
-				)
-			default:
-				msg = fmt.Sprintf(
-					"Unknown error (status %d): %s",
-					res.StatusCode,
-					err,
-				)
-			}
+			msg = fmt.Sprintf(
+				"Unknown error (status %d): %s",
+				res.StatusCode,
+				err,
+			)
 		}
 		resp.Diagnostics.AddError("Unable to delete branch protection", msg)
 
@@ -748,7 +762,7 @@ func (r *branchProtectionResource) ImportState(ctx context.Context, req resource
 	owner, repo, branchName := parts[0], parts[1], parts[2]
 
 	// Use Forgejo client to get branch protection
-	protection, diags := r.getBranchProtection(
+	protection, found, diags := r.lookupBranchProtection(
 		ctx,
 		owner,
 		repo,
@@ -756,6 +770,19 @@ func (r *branchProtectionResource) ImportState(ctx context.Context, req resource
 	)
 	response.Diagnostics.Append(diags...)
 	if response.Diagnostics.HasError() {
+		return
+	}
+	if !found {
+		response.Diagnostics.AddError(
+			"Unable to read branch protection",
+			fmt.Sprintf(
+				"Branch protection with owner '%s', repo '%s' and name '%s' not found",
+				owner,
+				repo,
+				branchName,
+			),
+		)
+
 		return
 	}
 
@@ -790,8 +817,10 @@ func NewBranchProtectionResource() resource.Resource {
 	return &branchProtectionResource{}
 }
 
-// getBranchProtection returns the branch protection with the given name from the repository.
-func (r *branchProtectionResource) getBranchProtection(ctx context.Context, owner, repo, name string) (*forgejo.BranchProtection, diag.Diagnostics) {
+// lookupBranchProtection returns the branch protection with the given name
+// from the repository. A protection that is not there is found == false, not
+// an error.
+func (r *branchProtectionResource) lookupBranchProtection(ctx context.Context, owner, repo, name string) (*forgejo.BranchProtection, bool, diag.Diagnostics) {
 	var diags diag.Diagnostics
 
 	tflog.Info(ctx, "Read branch protection", map[string]any{
@@ -807,7 +836,10 @@ func (r *branchProtectionResource) getBranchProtection(ctx context.Context, owne
 		name,
 	)
 	if err == nil {
-		return protection, diags
+		return protection, true, diags
+	}
+	if isNotFound(res) {
+		return nil, false, diags
 	}
 
 	// Handle errors
@@ -819,26 +851,15 @@ func (r *branchProtectionResource) getBranchProtection(ctx context.Context, owne
 			"status": res.Status,
 		})
 
-		switch res.StatusCode {
-		case 404:
-			msg = fmt.Sprintf(
-				"Branch protection with owner '%s', repo '%s' and name '%s' not found: %s",
-				owner,
-				repo,
-				name,
-				err,
-			)
-		default:
-			msg = fmt.Sprintf(
-				"Unknown error (status %d): %s",
-				res.StatusCode,
-				err,
-			)
-		}
+		msg = fmt.Sprintf(
+			"Unknown error (status %d): %s",
+			res.StatusCode,
+			err,
+		)
 	}
 	diags.AddError("Unable to read branch protection", msg)
 
-	return nil, diags
+	return nil, false, diags
 }
 
 // Helper function to convert model to CreateBranchProtectionOption.

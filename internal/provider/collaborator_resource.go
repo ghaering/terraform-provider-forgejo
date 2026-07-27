@@ -236,13 +236,20 @@ func (r *collaboratorResource) Read(ctx context.Context, req resource.ReadReques
 	}
 
 	// Use Forgejo client to get repository
-	rep, diags := getRepositoryByID(
+	rep, found, diags := lookupRepositoryByID(
 		ctx,
 		r.client,
 		data.RepositoryID.ValueInt64(),
 	)
 	resp.Diagnostics.Append(diags...)
 	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	// The repository is gone, so is the collaborator. Drop it from state.
+	if !found {
+		resp.State.RemoveResource(ctx)
+
 		return
 	}
 
@@ -255,8 +262,10 @@ func (r *collaboratorResource) Read(ctx context.Context, req resource.ReadReques
 		"collaborator": data.User.ValueString(),
 	})
 
-	// Use Forgejo client to get collaborator permission
-	perms, res, err := r.client.CollaboratorPermission(
+	// Ask whether the user is a collaborator at all. The permission endpoint
+	// below reports the effective permission, which on a public repository is
+	// 'read' for everyone.
+	ok, res, err := r.client.IsCollaborator(
 		repo.Owner.ValueString(),
 		repo.Name.ValueString(),
 		data.User.ValueString(),
@@ -279,9 +288,69 @@ func (r *collaboratorResource) Read(ctx context.Context, req resource.ReadReques
 					data.User.String(),
 					err,
 				)
-			case 404:
+			default:
 				msg = fmt.Sprintf(
-					"Collaborator with user %s, repo %s and name %s not found: %s",
+					"Unknown error (status %d): %s",
+					res.StatusCode,
+					err,
+				)
+			}
+		}
+		resp.Diagnostics.AddError("Unable to read collaborator", msg)
+
+		return
+	}
+
+	// Not a collaborator. The API answers 404 for that, so any other status
+	// means the check failed, not that the collaborator is gone.
+	if !ok {
+		if !isNotFound(res) {
+			var msg string
+			if res == nil {
+				msg = "Unknown error with nil response"
+			} else {
+				tflog.Error(ctx, "Error", map[string]any{
+					"status": res.Status,
+				})
+
+				msg = fmt.Sprintf("Unknown error (status %d)", res.StatusCode)
+			}
+			resp.Diagnostics.AddError("Unable to read collaborator", msg)
+
+			return
+		}
+
+		resp.State.RemoveResource(ctx)
+
+		return
+	}
+
+	// Use Forgejo client to get collaborator permission
+	perms, res, err := r.client.CollaboratorPermission(
+		repo.Owner.ValueString(),
+		repo.Name.ValueString(),
+		data.User.ValueString(),
+	)
+	if err != nil {
+		// Removed between the two calls.
+		if isNotFound(res) {
+			resp.State.RemoveResource(ctx)
+
+			return
+		}
+
+		var msg string
+		if res == nil {
+			msg = fmt.Sprintf("Unknown error with nil response: %s", err)
+		} else {
+			tflog.Error(ctx, "Error", map[string]any{
+				"status": res.Status,
+			})
+
+			switch res.StatusCode {
+			case 403:
+				msg = fmt.Sprintf(
+					"Collaborator with user %s, repo %s and name %s forbidden: %s",
 					repo.Owner.String(),
 					repo.Name.String(),
 					data.User.String(),
@@ -427,13 +496,18 @@ func (r *collaboratorResource) Delete(ctx context.Context, req resource.DeleteRe
 	}
 
 	// Use Forgejo client to get repository
-	rep, diags := getRepositoryByID(
+	rep, found, diags := lookupRepositoryByID(
 		ctx,
 		r.client,
 		data.RepositoryID.ValueInt64(),
 	)
 	resp.Diagnostics.Append(diags...)
 	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	// The repository is gone, so is the collaborator.
+	if !found {
 		return
 	}
 
@@ -452,6 +526,12 @@ func (r *collaboratorResource) Delete(ctx context.Context, req resource.DeleteRe
 		repo.Name.ValueString(),
 		data.User.ValueString(),
 	)
+
+	// Already gone, nothing to delete.
+	if isNotFound(res) {
+		return
+	}
+
 	if err != nil {
 		var msg string
 		if res == nil {
@@ -462,14 +542,6 @@ func (r *collaboratorResource) Delete(ctx context.Context, req resource.DeleteRe
 			})
 
 			switch res.StatusCode {
-			case 404:
-				msg = fmt.Sprintf(
-					"Collaborator with user %s, repo %s and name %s not found: %s",
-					repo.Owner.String(),
-					repo.Name.String(),
-					data.User.String(),
-					err,
-				)
 			case 422:
 				msg = fmt.Sprintf("Input validation error: %s", err)
 			default:

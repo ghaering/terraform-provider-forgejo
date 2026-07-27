@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"time"
 
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
@@ -236,8 +237,9 @@ func NewUserDataSource() datasource.DataSource {
 	return &userDataSource{}
 }
 
-// getUserByID fetches a user by its ID and handles errors consistently.
-func getUserByID(ctx context.Context, client *forgejo.Client, id int64) (*forgejo.User, diag.Diagnostics) {
+// lookupUserByID fetches a user by its ID. A user that is not there is found
+// == false, not an error.
+func lookupUserByID(ctx context.Context, client *forgejo.Client, id int64) (*forgejo.User, bool, diag.Diagnostics) {
 	var diags diag.Diagnostics
 
 	tflog.Info(ctx, "Read user", map[string]any{
@@ -247,7 +249,14 @@ func getUserByID(ctx context.Context, client *forgejo.Client, id int64) (*forgej
 	// Use Forgejo client to get user
 	usr, res, err := client.GetUserByID(id)
 	if err == nil {
-		return usr, diags
+		return usr, true, diags
+	}
+
+	// GetUserByID searches by uid rather than fetching the user, so a user
+	// that is not there comes back as an error the SDK makes up on top of a
+	// successful search - there is no 404 to test for.
+	if isNotFound(res) || (res != nil && res.StatusCode == http.StatusOK) {
+		return nil, false, diags
 	}
 
 	// Handle errors
@@ -259,24 +268,34 @@ func getUserByID(ctx context.Context, client *forgejo.Client, id int64) (*forgej
 			"status": res.Status,
 		})
 
-		switch res.StatusCode {
-		case 404:
-			msg = fmt.Sprintf(
-				"User with ID %d not found: %s",
-				id,
-				err,
-			)
-		default:
-			msg = fmt.Sprintf(
-				"Unknown error (status %d): %s",
-				res.StatusCode,
-				err,
-			)
-		}
+		msg = fmt.Sprintf(
+			"Unknown error (status %d): %s",
+			res.StatusCode,
+			err,
+		)
 	}
 	diags.AddError("Unable to read user", msg)
 
-	return nil, diags
+	return nil, false, diags
+}
+
+// getUserByID fetches a user by its ID and handles errors consistently. A
+// missing user is an error.
+func getUserByID(ctx context.Context, client *forgejo.Client, id int64) (*forgejo.User, diag.Diagnostics) {
+	usr, found, diags := lookupUserByID(ctx, client, id)
+	if diags.HasError() {
+		return nil, diags
+	}
+	if !found {
+		diags.AddError(
+			"Unable to read user",
+			fmt.Sprintf("User with ID %d not found", id),
+		)
+
+		return nil, diags
+	}
+
+	return usr, diags
 }
 
 // getUserByName fetches a user by its name and handles errors consistently.

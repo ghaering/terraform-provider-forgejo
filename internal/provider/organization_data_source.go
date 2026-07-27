@@ -214,6 +214,25 @@ func getOrganizationByID(ctx context.Context, client *forgejo.Client, id int64) 
 
 // getOrganizationByName fetches an organization by its name and handles errors consistently.
 func getOrganizationByName(ctx context.Context, client *forgejo.Client, name string) (*forgejo.Organization, diag.Diagnostics) {
+	org, found, diags := lookupOrganizationByName(ctx, client, name)
+	if diags.HasError() {
+		return nil, diags
+	}
+	if !found {
+		diags.AddError(
+			"Unable to read organization",
+			fmt.Sprintf("Organization with name '%s' not found", name),
+		)
+
+		return nil, diags
+	}
+
+	return org, diags
+}
+
+// lookupOrganizationByName fetches an organization by its name. A organization
+// that is not there is found == false, not an error.
+func lookupOrganizationByName(ctx context.Context, client *forgejo.Client, name string) (*forgejo.Organization, bool, diag.Diagnostics) {
 	var diags diag.Diagnostics
 
 	tflog.Info(ctx, "Read organization", map[string]any{
@@ -223,7 +242,10 @@ func getOrganizationByName(ctx context.Context, client *forgejo.Client, name str
 	// Use Forgejo client to get organization
 	org, res, err := client.GetOrg(name)
 	if err == nil {
-		return org, diags
+		return org, true, diags
+	}
+	if isNotFound(res) {
+		return nil, false, diags
 	}
 
 	// Handle errors
@@ -235,22 +257,13 @@ func getOrganizationByName(ctx context.Context, client *forgejo.Client, name str
 			"status": res.Status,
 		})
 
-		switch res.StatusCode {
-		case 404:
-			msg = fmt.Sprintf(
-				"Organization with name '%s' not found: %s",
-				name,
-				err,
-			)
-		default:
-			msg = fmt.Sprintf(
-				"Unknown error (status %d): %s",
-				res.StatusCode,
-				err,
-			)
-		}
+		msg = fmt.Sprintf(
+			"Unknown error (status %d): %s",
+			res.StatusCode,
+			err,
+		)
 	}
 	diags.AddError("Unable to read organization", msg)
 
-	return nil, diags
+	return nil, false, diags
 }

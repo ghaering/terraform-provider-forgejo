@@ -632,7 +632,7 @@ func (r *repositoryResource) Schema(_ context.Context, _ resource.SchemaRequest,
 				Computed:    true,
 				// 6b66d9e: standardize on formatting temporal data in RFC3339 format
 				// PlanModifiers: []planmodifier.String{
-				// 	stringplanmodifier.UseStateForUnknown(),
+				// stringplanmodifier.UseStateForUnknown(),
 				// },
 			},
 			"updated_at": schema.StringAttribute{
@@ -1430,9 +1430,9 @@ func (r *repositoryResource) Create(ctx context.Context, req resource.CreateRequ
 	// Validate API request body
 	// err := eopts.Validate()
 	// if err != nil {
-	// 	resp.Diagnostics.AddError("Input validation error", err.Error())
+	// resp.Diagnostics.AddError("Input validation error", err.Error())
 
-	// 	return
+	// return
 	// }
 
 	// Use Forgejo client to update existing repository
@@ -1510,13 +1510,20 @@ func (r *repositoryResource) Read(ctx context.Context, req resource.ReadRequest,
 	}
 
 	// Use Forgejo client to get repository
-	rep, diags := getRepositoryByID(
+	rep, found, diags := lookupRepositoryByID(
 		ctx,
 		r.client,
 		data.ID.ValueInt64(),
 	)
 	resp.Diagnostics.Append(diags...)
 	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	// Gone. Drop it from state, the next plan creates it again.
+	if !found {
+		resp.State.RemoveResource(ctx)
+
 		return
 	}
 
@@ -1617,9 +1624,9 @@ func (r *repositoryResource) Update(ctx context.Context, req resource.UpdateRequ
 	// Validate API request body
 	// err := opts.Validate()
 	// if err != nil {
-	// 	resp.Diagnostics.AddError("Input validation error", err.Error())
+	// resp.Diagnostics.AddError("Input validation error", err.Error())
 
-	// 	return
+	// return
 	// }
 
 	// Use Forgejo client to update existing repository
@@ -1731,6 +1738,11 @@ func (r *repositoryResource) Delete(ctx context.Context, req resource.DeleteRequ
 		)
 	}
 
+	// Already gone, nothing to delete.
+	if isNotFound(res) {
+		return
+	}
+
 	if err != nil {
 		var msg string
 		if res == nil {
@@ -1744,13 +1756,6 @@ func (r *repositoryResource) Delete(ctx context.Context, req resource.DeleteRequ
 			case 403:
 				msg = fmt.Sprintf(
 					"Repository with owner %s and name %s forbidden: %s",
-					data.Owner.String(),
-					data.Name.String(),
-					err,
-				)
-			case 404:
-				msg = fmt.Sprintf(
-					"Repository with owner %s and name %s not found: %s",
 					data.Owner.String(),
 					data.Name.String(),
 					err,

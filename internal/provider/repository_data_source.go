@@ -582,8 +582,9 @@ func NewRepositoryDataSource() datasource.DataSource {
 	return &repositoryDataSource{}
 }
 
-// getRepositoryByID fetches a repository by its ID and handles errors consistently.
-func getRepositoryByID(ctx context.Context, client *forgejo.Client, id int64) (*forgejo.Repository, diag.Diagnostics) {
+// lookupRepositoryByID fetches a repository by its ID. A repository that is
+// not there is found == false, not an error.
+func lookupRepositoryByID(ctx context.Context, client *forgejo.Client, id int64) (*forgejo.Repository, bool, diag.Diagnostics) {
 	var diags diag.Diagnostics
 
 	tflog.Info(ctx, "Read repository", map[string]any{
@@ -593,7 +594,10 @@ func getRepositoryByID(ctx context.Context, client *forgejo.Client, id int64) (*
 	// Use Forgejo client to get repository
 	rep, res, err := client.GetRepoByID(id)
 	if err == nil {
-		return rep, diags
+		return rep, true, diags
+	}
+	if isNotFound(res) {
+		return nil, false, diags
 	}
 
 	// Handle errors
@@ -605,24 +609,34 @@ func getRepositoryByID(ctx context.Context, client *forgejo.Client, id int64) (*
 			"status": res.Status,
 		})
 
-		switch res.StatusCode {
-		case 404:
-			msg = fmt.Sprintf(
-				"Repository with ID %d not found: %s",
-				id,
-				err,
-			)
-		default:
-			msg = fmt.Sprintf(
-				"Unknown error (status %d): %s",
-				res.StatusCode,
-				err,
-			)
-		}
+		msg = fmt.Sprintf(
+			"Unknown error (status %d): %s",
+			res.StatusCode,
+			err,
+		)
 	}
 	diags.AddError("Unable to read repository", msg)
 
-	return nil, diags
+	return nil, false, diags
+}
+
+// getRepositoryByID fetches a repository by its ID and handles errors
+// consistently. A missing repository is an error.
+func getRepositoryByID(ctx context.Context, client *forgejo.Client, id int64) (*forgejo.Repository, diag.Diagnostics) {
+	rep, found, diags := lookupRepositoryByID(ctx, client, id)
+	if diags.HasError() {
+		return nil, diags
+	}
+	if !found {
+		diags.AddError(
+			"Unable to read repository",
+			fmt.Sprintf("Repository with ID %d not found", id),
+		)
+
+		return nil, diags
+	}
+
+	return rep, diags
 }
 
 // getRepositoryByName fetches a repository by its name and handles errors consistently.

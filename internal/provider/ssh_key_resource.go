@@ -128,7 +128,7 @@ func (r *sshKeyResource) Schema(_ context.Context, _ resource.SchemaRequest, res
 				Computed:    true,
 				// 6b66d9e: standardize on formatting temporal data in RFC3339 format
 				// PlanModifiers: []planmodifier.String{
-				// 	stringplanmodifier.UseStateForUnknown(),
+				// stringplanmodifier.UseStateForUnknown(),
 				// },
 			},
 			"read_only": schema.BoolAttribute{
@@ -199,9 +199,9 @@ func (r *sshKeyResource) Create(ctx context.Context, req resource.CreateRequest,
 	// Validate API request body
 	// err := opts.Validate()
 	// if err != nil {
-	// 	resp.Diagnostics.AddError("Input validation error", err.Error())
+	// resp.Diagnostics.AddError("Input validation error", err.Error())
 
-	// 	return
+	// return
 	// }
 
 	// Use Forgejo client to create new SSH key
@@ -275,6 +275,13 @@ func (r *sshKeyResource) Read(ctx context.Context, req resource.ReadRequest, res
 	// Use Forgejo client to get SSH key
 	key, res, err := r.client.GetPublicKey(data.KeyID.ValueInt64())
 	if err != nil {
+		// Gone. Drop it from state, the next plan creates it again.
+		if isNotFound(res) {
+			resp.State.RemoveResource(ctx)
+
+			return
+		}
+
 		var msg string
 		if res == nil {
 			msg = fmt.Sprintf("Unknown error with nil response: %s", err)
@@ -287,13 +294,6 @@ func (r *sshKeyResource) Read(ctx context.Context, req resource.ReadRequest, res
 			case 403:
 				msg = fmt.Sprintf(
 					"SSH key with user %s and ID %d forbidden: %s",
-					data.User.String(),
-					data.KeyID.ValueInt64(),
-					err,
-				)
-			case 404:
-				msg = fmt.Sprintf(
-					"SSH key with user %s and ID %d not found: %s",
 					data.User.String(),
 					data.KeyID.ValueInt64(),
 					err,
@@ -352,6 +352,12 @@ func (r *sshKeyResource) Delete(ctx context.Context, req resource.DeleteRequest,
 		data.User.ValueString(),
 		int(data.KeyID.ValueInt64()),
 	)
+
+	// Already gone, nothing to delete.
+	if isNotFound(res) {
+		return
+	}
+
 	if err != nil {
 		var msg string
 		if res == nil {
@@ -365,13 +371,6 @@ func (r *sshKeyResource) Delete(ctx context.Context, req resource.DeleteRequest,
 			case 403:
 				msg = fmt.Sprintf(
 					"SSH key with user %s and ID %d forbidden: %s",
-					data.User.String(),
-					data.KeyID.ValueInt64(),
-					err,
-				)
-			case 404:
-				msg = fmt.Sprintf(
-					"SSH key with user %s and ID %d not found: %s",
 					data.User.String(),
 					data.KeyID.ValueInt64(),
 					err,

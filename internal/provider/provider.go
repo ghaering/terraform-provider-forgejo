@@ -2,6 +2,7 @@ package provider
 
 import (
 	"context"
+	"net/http"
 	"os"
 	"strings"
 
@@ -282,6 +283,12 @@ func New(version string) func() provider.Provider {
 			version: version,
 		}
 	}
+}
+
+// isNotFound reports whether a failed API call means the object is not there.
+// A nil response never reached the server and says nothing about it.
+func isNotFound(res *forgejo.Response) bool {
+	return res != nil && res.StatusCode == http.StatusNotFound
 }
 
 // Internal helper functions for tracing function execution.

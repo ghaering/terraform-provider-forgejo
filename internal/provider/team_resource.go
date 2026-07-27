@@ -327,13 +327,20 @@ func (r *teamResource) Read(ctx context.Context, req resource.ReadRequest, resp 
 	}
 
 	// Use Forgejo client to read existing team
-	team, diags := getOrgTeamByID(
+	team, found, diags := lookupOrgTeamByID(
 		ctx,
 		r.client,
 		data.ID.ValueInt64(),
 	)
 	resp.Diagnostics.Append(diags...)
 	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	// Gone. Drop it from state, the next plan creates it again.
+	if !found {
+		resp.State.RemoveResource(ctx)
+
 		return
 	}
 
@@ -423,6 +430,12 @@ func (r *teamResource) Delete(ctx context.Context, req resource.DeleteRequest, r
 
 	// Use Forgejo client to delete existing team
 	res, err := r.client.DeleteTeam(data.ID.ValueInt64())
+
+	// Already gone, nothing to delete.
+	if isNotFound(res) {
+		return
+	}
+
 	if err != nil {
 		var msg string
 		if res == nil {
@@ -432,20 +445,11 @@ func (r *teamResource) Delete(ctx context.Context, req resource.DeleteRequest, r
 				"status": res.Status,
 			})
 
-			switch res.StatusCode {
-			case 404:
-				msg = fmt.Sprintf(
-					"Team with ID %d not found: %s",
-					data.ID.ValueInt64(),
-					err,
-				)
-			default:
-				msg = fmt.Sprintf(
-					"Unknown error (status %d): %s",
-					res.StatusCode,
-					err,
-				)
-			}
+			msg = fmt.Sprintf(
+				"Unknown error (status %d): %s",
+				res.StatusCode,
+				err,
+			)
 		}
 		resp.Diagnostics.AddError("Unable to delete team", msg)
 
