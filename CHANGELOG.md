@@ -1,3 +1,9 @@
+## Unreleased
+
+FEATURES:
+
+- **New Resource**: `forgejo_team_repository` ([documentation](docs/resources/team_repository.md))
+
 ## 1.5.1 (July 12, 2026)
 
 ENHANCEMENTS:
