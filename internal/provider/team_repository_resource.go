@@ -3,7 +3,6 @@ package provider
 import (
 	"context"
 	"fmt"
-	"net/http"
 	"strings"
 
 	"github.com/hashicorp/terraform-plugin-framework/diag"
@@ -291,7 +290,7 @@ func deleteTeamRepository(ctx context.Context, client *forgejo.Client, teamID in
 
 	// Already gone, nothing to delete. The 404 covers a missing team, a
 	// missing repository and an assignment removed elsewhere alike.
-	if res != nil && res.StatusCode == http.StatusNotFound {
+	if isNotFound(res) {
 		return diags
 	}
 
