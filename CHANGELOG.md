@@ -1,5 +1,9 @@
 ## Unreleased
 
+FEATURES:
+
+- **New Resource**: `forgejo_team_repository` ([documentation](docs/resources/team_repository.md))
+
 BUG FIXES:
 
 - All list-then-search lookups: Page through every result instead of relying on `Page: -1`, which only returns the first page
