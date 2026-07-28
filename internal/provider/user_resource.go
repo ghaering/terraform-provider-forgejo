@@ -220,7 +220,7 @@ func (r *userResource) Schema(_ context.Context, _ resource.SchemaRequest, resp 
 				Computed:    true,
 				// 6b66d9e: standardize on formatting temporal data in RFC3339 format
 				// PlanModifiers: []planmodifier.String{
-				// 	stringplanmodifier.UseStateForUnknown(),
+				// stringplanmodifier.UseStateForUnknown(),
 				// },
 			},
 			"restricted": schema.BoolAttribute{
@@ -496,9 +496,9 @@ func (r *userResource) Create(ctx context.Context, req resource.CreateRequest, r
 	// Validate API request body
 	// err := eopts.Validate()
 	// if err != nil {
-	// 	resp.Diagnostics.AddError("Input validation error", err.Error())
+	// resp.Diagnostics.AddError("Input validation error", err.Error())
 
-	// 	return
+	// return
 	// }
 
 	// Use Forgejo client to update existing user
@@ -578,13 +578,20 @@ func (r *userResource) Read(ctx context.Context, req resource.ReadRequest, resp 
 	}
 
 	// Use Forgejo client to get user
-	usr, diags := getUserByID(
+	usr, found, diags := lookupUserByID(
 		ctx,
 		r.client,
 		data.ID.ValueInt64(),
 	)
 	resp.Diagnostics.Append(diags...)
 	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	// Gone. Drop it from state, the next plan creates it again.
+	if !found {
+		resp.State.RemoveResource(ctx)
+
 		return
 	}
 
@@ -647,9 +654,9 @@ func (r *userResource) Update(ctx context.Context, req resource.UpdateRequest, r
 	// Validate API request body
 	// err := opts.Validate()
 	// if err != nil {
-	// 	resp.Diagnostics.AddError("Input validation error", err.Error())
+	// resp.Diagnostics.AddError("Input validation error", err.Error())
 
-	// 	return
+	// return
 	// }
 
 	// Use Forgejo client to update existing user
@@ -757,6 +764,11 @@ func (r *userResource) Delete(ctx context.Context, req resource.DeleteRequest, r
 		res, err = r.client.AdminDeleteUser(data.Name.ValueString())
 	}
 
+	// Already gone, nothing to delete or deactivate.
+	if isNotFound(res) {
+		return
+	}
+
 	if err != nil {
 		var msg string
 		if res == nil {
@@ -770,12 +782,6 @@ func (r *userResource) Delete(ctx context.Context, req resource.DeleteRequest, r
 			case 403:
 				msg = fmt.Sprintf(
 					"User with name %s forbidden: %s",
-					data.Name.String(),
-					err,
-				)
-			case 404:
-				msg = fmt.Sprintf(
-					"User with name %s not found: %s",
 					data.Name.String(),
 					err,
 				)

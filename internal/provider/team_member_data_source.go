@@ -111,8 +111,10 @@ func NewTeamMemberDataSource() datasource.DataSource {
 	return &teamMemberDataSource{}
 }
 
-// checkTeamMember fetches a team member and handles errors consistently.
-func checkTeamMember(ctx context.Context, client *forgejo.Client, teamID int64, userName string) diag.Diagnostics {
+// lookupTeamMember reports whether a user is a member of a team. Not a member
+// is found == false, not an error. A team that is gone counts as not found
+// too, the API answers 404 either way.
+func lookupTeamMember(ctx context.Context, client *forgejo.Client, teamID int64, userName string) (bool, diag.Diagnostics) {
 	var diags diag.Diagnostics
 
 	tflog.Info(ctx, "Read team member", map[string]any{
@@ -123,7 +125,10 @@ func checkTeamMember(ctx context.Context, client *forgejo.Client, teamID int64, 
 	// Use Forgejo client to get team member
 	_, res, err := client.GetTeamMember(teamID, userName)
 	if err == nil {
-		return diags
+		return true, diags
+	}
+	if isNotFound(res) {
+		return false, diags
 	}
 
 	// Handle errors
@@ -135,23 +140,30 @@ func checkTeamMember(ctx context.Context, client *forgejo.Client, teamID int64, 
 			"status": res.Status,
 		})
 
-		switch res.StatusCode {
-		case 404:
-			msg = fmt.Sprintf(
-				"User '%s' in team with ID %d not found: %s",
-				userName,
-				teamID,
-				err,
-			)
-		default:
-			msg = fmt.Sprintf(
-				"Unknown error (status %d): %s",
-				res.StatusCode,
-				err,
-			)
-		}
+		msg = fmt.Sprintf(
+			"Unknown error (status %d): %s",
+			res.StatusCode,
+			err,
+		)
 	}
 	diags.AddError("Unable to read team member", msg)
+
+	return false, diags
+}
+
+// checkTeamMember fetches a team member and handles errors consistently. A
+// user that is not a member is an error.
+func checkTeamMember(ctx context.Context, client *forgejo.Client, teamID int64, userName string) diag.Diagnostics {
+	found, diags := lookupTeamMember(ctx, client, teamID, userName)
+	if diags.HasError() {
+		return diags
+	}
+	if !found {
+		diags.AddError(
+			"Unable to read team member",
+			fmt.Sprintf("User '%s' in team with ID %d not found", userName, teamID),
+		)
+	}
 
 	return diags
 }

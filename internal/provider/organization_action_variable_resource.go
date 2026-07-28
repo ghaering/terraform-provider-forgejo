@@ -231,13 +231,25 @@ func (r *organizationActionVariableResource) Create(ctx context.Context, req res
 	}
 
 	// Use Forgejo client to get organization action variable
-	variable, diags := r.getVariable(
+	variable, found, diags := r.lookupVariable(
 		ctx,
 		data.Organization.ValueString(),
 		data.Name.ValueString(),
 	)
 	resp.Diagnostics.Append(diags...)
 	if resp.Diagnostics.HasError() {
+		return
+	}
+	if !found {
+		resp.Diagnostics.AddError(
+			"Unable to read organization action variable",
+			fmt.Sprintf(
+				"Action variable with organization '%s' and name '%s' not found",
+				data.Organization.ValueString(),
+				data.Name.ValueString(),
+			),
+		)
+
 		return
 	}
 
@@ -263,13 +275,20 @@ func (r *organizationActionVariableResource) Read(ctx context.Context, req resou
 	}
 
 	// Use Forgejo client to get organization action variable
-	variable, diags := r.getVariable(
+	variable, found, diags := r.lookupVariable(
 		ctx,
 		data.Organization.ValueString(),
 		data.Name.ValueString(),
 	)
 	resp.Diagnostics.Append(diags...)
 	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	// Gone. Drop it from state, the next plan creates it again.
+	if !found {
+		resp.State.RemoveResource(ctx)
+
 		return
 	}
 
@@ -393,6 +412,12 @@ func (r *organizationActionVariableResource) Delete(ctx context.Context, req res
 		data.Organization.ValueString(),
 		data.Name.ValueString(),
 	)
+
+	// Already gone, nothing to delete.
+	if isNotFound(res) {
+		return
+	}
+
 	if err != nil {
 		var msg string
 		if res == nil {
@@ -405,13 +430,6 @@ func (r *organizationActionVariableResource) Delete(ctx context.Context, req res
 			switch res.StatusCode {
 			case 400:
 				msg = fmt.Sprintf("Bad request: %s", err)
-			case 404:
-				msg = fmt.Sprintf(
-					"Action variable with organization %s and name %s not found: %s",
-					data.Organization.String(),
-					data.Name.String(),
-					err,
-				)
 			default:
 				msg = fmt.Sprintf(
 					"Unknown error (status %d): %s",
@@ -431,8 +449,9 @@ func NewOrganizationActionVariableResource() resource.Resource {
 	return &organizationActionVariableResource{}
 }
 
-// getVariable returns the variable with the given name from the organization.
-func (r *organizationActionVariableResource) getVariable(ctx context.Context, org, name string) (*forgejo.ActionVariable, diag.Diagnostics) {
+// lookupVariable returns the variable with the given name from the
+// organization. A variable that is not there is found == false, not an error.
+func (r *organizationActionVariableResource) lookupVariable(ctx context.Context, org, name string) (*forgejo.ActionVariable, bool, diag.Diagnostics) {
 	var diags diag.Diagnostics
 
 	tflog.Info(ctx, "Read organization action variable", map[string]any{
@@ -446,7 +465,12 @@ func (r *organizationActionVariableResource) getVariable(ctx context.Context, or
 		name,
 	)
 	if err == nil {
-		return variable, diags
+		return variable, true, diags
+	}
+	// A deleted organization takes its variables with it, so the 404 the API
+	// returns in that case means gone here too.
+	if isNotFound(res) {
+		return nil, false, diags
 	}
 
 	// Handle errors
@@ -461,13 +485,6 @@ func (r *organizationActionVariableResource) getVariable(ctx context.Context, or
 		switch res.StatusCode {
 		case 400:
 			msg = fmt.Sprintf("Bad request: %s", err)
-		case 404:
-			msg = fmt.Sprintf(
-				"Action variable with organization '%s' and name '%s' not found: %s",
-				org,
-				name,
-				err,
-			)
 		default:
 			msg = fmt.Sprintf(
 				"Unknown error (status %d): %s",
@@ -478,5 +495,5 @@ func (r *organizationActionVariableResource) getVariable(ctx context.Context, or
 	}
 	diags.AddError("Unable to read organization action variable", msg)
 
-	return nil, diags
+	return nil, false, diags
 }

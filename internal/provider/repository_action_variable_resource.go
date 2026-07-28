@@ -209,7 +209,7 @@ func (r *repositoryActionVariableResource) Create(ctx context.Context, req resou
 	}
 
 	// Use Forgejo client to get repository action variable
-	variable, diags := r.getVariable(
+	variable, found, diags := r.lookupVariable(
 		ctx,
 		repo.Owner.ValueString(),
 		repo.Name.ValueString(),
@@ -217,6 +217,19 @@ func (r *repositoryActionVariableResource) Create(ctx context.Context, req resou
 	)
 	resp.Diagnostics.Append(diags...)
 	if resp.Diagnostics.HasError() {
+		return
+	}
+	if !found {
+		resp.Diagnostics.AddError(
+			"Unable to read repository action variable",
+			fmt.Sprintf(
+				"Action variable with owner '%s', repo '%s' and name '%s' not found",
+				repo.Owner.ValueString(),
+				repo.Name.ValueString(),
+				data.Name.ValueString(),
+			),
+		)
+
 		return
 	}
 
@@ -245,7 +258,7 @@ func (r *repositoryActionVariableResource) Read(ctx context.Context, req resourc
 	}
 
 	// Use Forgejo client to get repository
-	rep, diags := getRepositoryByID(
+	rep, found, diags := lookupRepositoryByID(
 		ctx,
 		r.client,
 		data.RepositoryID.ValueInt64(),
@@ -255,11 +268,18 @@ func (r *repositoryActionVariableResource) Read(ctx context.Context, req resourc
 		return
 	}
 
+	// The repository is gone, so is the variable. Drop it from state.
+	if !found {
+		resp.State.RemoveResource(ctx)
+
+		return
+	}
+
 	// Map response body to model
 	repo.from(rep)
 
 	// Use Forgejo client to get repository action variable
-	variable, diags := r.getVariable(
+	variable, found, diags := r.lookupVariable(
 		ctx,
 		repo.Owner.ValueString(),
 		repo.Name.ValueString(),
@@ -267,6 +287,13 @@ func (r *repositoryActionVariableResource) Read(ctx context.Context, req resourc
 	)
 	resp.Diagnostics.Append(diags...)
 	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	// Gone. Drop it from state, the next plan creates it again.
+	if !found {
+		resp.State.RemoveResource(ctx)
+
 		return
 	}
 
@@ -403,13 +430,18 @@ func (r *repositoryActionVariableResource) Delete(ctx context.Context, req resou
 	}
 
 	// Use Forgejo client to get repository
-	rep, diags := getRepositoryByID(
+	rep, found, diags := lookupRepositoryByID(
 		ctx,
 		r.client,
 		data.RepositoryID.ValueInt64(),
 	)
 	resp.Diagnostics.Append(diags...)
 	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	// The repository is gone, so is the variable.
+	if !found {
 		return
 	}
 
@@ -429,6 +461,12 @@ func (r *repositoryActionVariableResource) Delete(ctx context.Context, req resou
 		repo.Name.ValueString(),
 		data.Name.ValueString(),
 	)
+
+	// Already gone, nothing to delete.
+	if isNotFound(res) {
+		return
+	}
+
 	if err != nil {
 		var msg string
 		if res == nil {
@@ -441,14 +479,6 @@ func (r *repositoryActionVariableResource) Delete(ctx context.Context, req resou
 			switch res.StatusCode {
 			case 400:
 				msg = fmt.Sprintf("Bad request: %s", err)
-			case 404:
-				msg = fmt.Sprintf(
-					"Action variable with owner %s, repo %s and name %s not found: %s",
-					repo.Owner.String(),
-					repo.Name.String(),
-					data.Name.String(),
-					err,
-				)
 			default:
 				msg = fmt.Sprintf(
 					"Unknown error (status %d): %s",
@@ -468,8 +498,9 @@ func NewRepositoryActionVariableResource() resource.Resource {
 	return &repositoryActionVariableResource{}
 }
 
-// getVariable returns the variable with the given name from the repository.
-func (r *repositoryActionVariableResource) getVariable(ctx context.Context, owner, repo, name string) (*forgejo.ActionVariable, diag.Diagnostics) {
+// lookupVariable returns the variable with the given name from the repository.
+// A variable that is not there is found == false, not an error.
+func (r *repositoryActionVariableResource) lookupVariable(ctx context.Context, owner, repo, name string) (*forgejo.ActionVariable, bool, diag.Diagnostics) {
 	var diags diag.Diagnostics
 
 	tflog.Info(ctx, "Read repository action variable", map[string]any{
@@ -485,7 +516,12 @@ func (r *repositoryActionVariableResource) getVariable(ctx context.Context, owne
 		name,
 	)
 	if err == nil {
-		return variable, diags
+		return variable, true, diags
+	}
+	// A deleted repository takes its variables with it, so the 404 the API
+	// returns in that case means gone here too.
+	if isNotFound(res) {
+		return nil, false, diags
 	}
 
 	// Handle errors
@@ -500,14 +536,6 @@ func (r *repositoryActionVariableResource) getVariable(ctx context.Context, owne
 		switch res.StatusCode {
 		case 400:
 			msg = fmt.Sprintf("Bad request: %s", err)
-		case 404:
-			msg = fmt.Sprintf(
-				"Action variable with owner '%s', repo '%s' and name '%s' not found: %s",
-				owner,
-				repo,
-				name,
-				err,
-			)
 		default:
 			msg = fmt.Sprintf(
 				"Unknown error (status %d): %s",
@@ -518,5 +546,5 @@ func (r *repositoryActionVariableResource) getVariable(ctx context.Context, owne
 	}
 	diags.AddError("Unable to read repository action variable", msg)
 
-	return nil, diags
+	return nil, false, diags
 }

@@ -242,13 +242,25 @@ func (r *organizationActionSecretResource) Create(ctx context.Context, req resou
 	}
 
 	// Use Forgejo client to get organization action secret
-	secret, diags := r.getSecret(
+	secret, found, diags := r.lookupSecret(
 		ctx,
 		data.Organization.ValueString(),
 		data.Name.ValueString(),
 	)
 	resp.Diagnostics.Append(diags...)
 	if resp.Diagnostics.HasError() {
+		return
+	}
+	if !found {
+		resp.Diagnostics.AddError(
+			"Unable to find organization action secret by name",
+			fmt.Sprintf(
+				"Action secret with organization '%s' and name '%s' not found",
+				data.Organization.ValueString(),
+				data.Name.ValueString(),
+			),
+		)
+
 		return
 	}
 
@@ -274,13 +286,20 @@ func (r *organizationActionSecretResource) Read(ctx context.Context, req resourc
 	}
 
 	// Use Forgejo client to get organization action secret
-	secret, diags := r.getSecret(
+	secret, found, diags := r.lookupSecret(
 		ctx,
 		data.Organization.ValueString(),
 		data.Name.ValueString(),
 	)
 	resp.Diagnostics.Append(diags...)
 	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	// Gone. Drop it from state, the next plan creates it again.
+	if !found {
+		resp.State.RemoveResource(ctx)
+
 		return
 	}
 
@@ -402,6 +421,12 @@ func (r *organizationActionSecretResource) Delete(ctx context.Context, req resou
 		data.Organization.ValueString(),
 		data.Name.ValueString(),
 	)
+
+	// Already gone, nothing to delete.
+	if isNotFound(res) {
+		return
+	}
+
 	if err != nil {
 		var msg string
 		if res == nil {
@@ -414,13 +439,6 @@ func (r *organizationActionSecretResource) Delete(ctx context.Context, req resou
 			switch res.StatusCode {
 			case 400:
 				msg = fmt.Sprintf("Bad request: %s", err)
-			case 404:
-				msg = fmt.Sprintf(
-					"Action secret with organization %s and name %s not found: %s",
-					data.Organization.String(),
-					data.Name.String(),
-					err,
-				)
 			default:
 				msg = fmt.Sprintf(
 					"Unknown error (status %d): %s",
@@ -440,8 +458,11 @@ func NewOrganizationActionSecretResource() resource.Resource {
 	return &organizationActionSecretResource{}
 }
 
-// getSecret returns the secret with the given name from the organization.
-func (r *organizationActionSecretResource) getSecret(ctx context.Context, org, name string) (*forgejo.Secret, diag.Diagnostics) {
+// lookupSecret returns the secret with the given name from the organization.
+// There is no API to read a single secret, so the organization's secrets are
+// listed and searched. A secret that is not in the list is found == false, not
+// an error.
+func (r *organizationActionSecretResource) lookupSecret(ctx context.Context, org, name string) (*forgejo.Secret, bool, diag.Diagnostics) {
 	var diags diag.Diagnostics
 
 	tflog.Info(ctx, "List organization action secrets", map[string]any{
@@ -449,11 +470,12 @@ func (r *organizationActionSecretResource) getSecret(ctx context.Context, org, n
 		"name": name,
 	})
 
-	// Page through all secrets explicitly: ListOptions{Page: -1} only returns
-	// the server's default first page (~30), so a secret past page 1 would be
-	// missed and Read would fail with "not found" for a secret that exists.
+	// Page through all secrets. Page: -1 only returns the server's default
+	// first page, and a secret missing from an incomplete listing would read
+	// as deleted here.
 	const pageSize = 50
 	for page := 1; ; page++ {
+		// Use Forgejo client to list organization action secrets
 		secrets, res, err := r.client.ListOrgActionSecret(
 			org,
 			forgejo.ListOrgActionSecretOption{
@@ -464,6 +486,12 @@ func (r *organizationActionSecretResource) getSecret(ctx context.Context, org, n
 			},
 		)
 		if err != nil {
+			// A deleted organization takes its secrets with it, so the 404 the
+			// API returns in that case means gone here too.
+			if isNotFound(res) {
+				return nil, false, diags
+			}
+
 			var msg string
 			if res == nil {
 				msg = fmt.Sprintf("Unknown error with nil response: %s", err)
@@ -472,49 +500,29 @@ func (r *organizationActionSecretResource) getSecret(ctx context.Context, org, n
 					"status": res.Status,
 				})
 
-				switch res.StatusCode {
-				case 404:
-					msg = fmt.Sprintf(
-						"Action secrets with organization '%s' not found: %s",
-						org,
-						err,
-					)
-				default:
-					msg = fmt.Sprintf(
-						"Unknown error (status %d): %s",
-						res.StatusCode,
-						err,
-					)
-				}
+				msg = fmt.Sprintf(
+					"Unknown error (status %d): %s",
+					res.StatusCode,
+					err,
+				)
 			}
 			diags.AddError("Unable to list organization action secrets", msg)
 
-			return nil, diags
+			return nil, false, diags
 		}
 
-		// Search this page for an organization action secret with the given name.
+		// Search this page for organization action secrets with given name
 		idx := slices.IndexFunc(secrets, func(s *forgejo.Secret) bool {
 			return strings.EqualFold(s.Name, name)
 		})
 		if idx != -1 {
-			return secrets[idx], diags
+			return secrets[idx], true, diags
 		}
 
 		// Only an empty page proves this was the last page. The server caps
 		// the page size at MAX_RESPONSE_ITEMS, so a short page is no proof.
 		if len(secrets) == 0 {
-			break
+			return nil, false, diags
 		}
 	}
-
-	diags.AddError(
-		"Unable to find organization action secret by name",
-		fmt.Sprintf(
-			"Action secret with organization '%s' and name '%s' not found",
-			org,
-			name,
-		),
-	)
-
-	return nil, diags
 }

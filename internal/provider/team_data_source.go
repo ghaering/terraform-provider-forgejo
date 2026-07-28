@@ -203,8 +203,9 @@ func NewTeamDataSource() datasource.DataSource {
 	return &teamDataSource{}
 }
 
-// getOrgTeamByID fetches a team by its ID and handles errors consistently.
-func getOrgTeamByID(ctx context.Context, client *forgejo.Client, id int64) (*forgejo.Team, diag.Diagnostics) {
+// lookupOrgTeamByID fetches a team by its ID. A team that is not there is
+// found == false, not an error.
+func lookupOrgTeamByID(ctx context.Context, client *forgejo.Client, id int64) (*forgejo.Team, bool, diag.Diagnostics) {
 	var diags diag.Diagnostics
 
 	tflog.Info(ctx, "Read team", map[string]any{
@@ -214,7 +215,10 @@ func getOrgTeamByID(ctx context.Context, client *forgejo.Client, id int64) (*for
 	// Use Forgejo client to get team
 	team, res, err := client.GetTeam(id)
 	if err == nil {
-		return team, diags
+		return team, true, diags
+	}
+	if isNotFound(res) {
+		return nil, false, diags
 	}
 
 	// Handle errors
@@ -226,24 +230,34 @@ func getOrgTeamByID(ctx context.Context, client *forgejo.Client, id int64) (*for
 			"status": res.Status,
 		})
 
-		switch res.StatusCode {
-		case 404:
-			msg = fmt.Sprintf(
-				"Team with ID %d not found: %s",
-				id,
-				err,
-			)
-		default:
-			msg = fmt.Sprintf(
-				"Unknown error (status %d): %s",
-				res.StatusCode,
-				err,
-			)
-		}
+		msg = fmt.Sprintf(
+			"Unknown error (status %d): %s",
+			res.StatusCode,
+			err,
+		)
 	}
 	diags.AddError("Unable to read team", msg)
 
-	return nil, diags
+	return nil, false, diags
+}
+
+// getOrgTeamByID fetches a team by its ID and handles errors consistently. A
+// missing team is an error.
+func getOrgTeamByID(ctx context.Context, client *forgejo.Client, id int64) (*forgejo.Team, diag.Diagnostics) {
+	team, found, diags := lookupOrgTeamByID(ctx, client, id)
+	if diags.HasError() {
+		return nil, diags
+	}
+	if !found {
+		diags.AddError(
+			"Unable to read team",
+			fmt.Sprintf("Team with ID %d not found", id),
+		)
+
+		return nil, diags
+	}
+
+	return team, diags
 }
 
 // getOrgTeamByName fetches a team by its name and handles errors consistently.

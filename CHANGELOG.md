@@ -6,7 +6,10 @@ FEATURES:
 
 BUG FIXES:
 
+- All resources: Drop an object deleted outside of Terraform from state instead of failing every plan, and let `terraform destroy` succeed on an object that is already gone
 - All list-then-search lookups: Page through every result instead of relying on `Page: -1`, which only returns the first page
+- `forgejo_collaborator`: Notice a collaborator removed outside of Terraform. The effective permission was read instead of the membership, and that is "read" for everyone on a public repository
+- `forgejo_user`: Report a user that no longer exists as deleted. The SDK looks users up by search, so a missing user arrives as an error on top of a 200 response
 
 ## 1.5.1 (July 12, 2026)
 

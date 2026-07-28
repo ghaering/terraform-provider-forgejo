@@ -129,7 +129,7 @@ func (r *teamMemberResource) Read(ctx context.Context, req resource.ReadRequest,
 	}
 
 	// Use Forgejo client to check a team member
-	diags = checkTeamMember(
+	found, diags := lookupTeamMember(
 		ctx,
 		r.client,
 		data.TeamID.ValueInt64(),
@@ -137,6 +137,13 @@ func (r *teamMemberResource) Read(ctx context.Context, req resource.ReadRequest,
 	)
 	resp.Diagnostics.Append(diags...)
 	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	// Gone. Drop it from state, the next plan creates it again.
+	if !found {
+		resp.State.RemoveResource(ctx)
+
 		return
 	}
 
@@ -243,6 +250,12 @@ func deleteTeamMember(ctx context.Context, client *forgejo.Client, teamID int64,
 		return diags
 	}
 
+	// Already gone, nothing to delete. The 404 covers a missing team, a
+	// missing user and a removed membership alike.
+	if isNotFound(res) {
+		return diags
+	}
+
 	// Handle errors
 	var msg string
 	if res == nil {
@@ -252,21 +265,11 @@ func deleteTeamMember(ctx context.Context, client *forgejo.Client, teamID int64,
 			"status": res.Status,
 		})
 
-		switch res.StatusCode {
-		case 404:
-			msg = fmt.Sprintf(
-				"Either user '%s' or team with ID %d not found: %s",
-				userName,
-				teamID,
-				err,
-			)
-		default:
-			msg = fmt.Sprintf(
-				"Unknown error (status %d): %s",
-				res.StatusCode,
-				err,
-			)
-		}
+		msg = fmt.Sprintf(
+			"Unknown error (status %d): %s",
+			res.StatusCode,
+			err,
+		)
 	}
 	diags.AddError("Unable to delete team member", msg)
 

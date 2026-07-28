@@ -219,7 +219,7 @@ func (r *repositoryActionSecretResource) Create(ctx context.Context, req resourc
 	}
 
 	// Use Forgejo client to get repository action secret
-	secret, diags := r.getSecret(
+	secret, found, diags := r.lookupSecret(
 		ctx,
 		repo.Owner.ValueString(),
 		repo.Name.ValueString(),
@@ -227,6 +227,19 @@ func (r *repositoryActionSecretResource) Create(ctx context.Context, req resourc
 	)
 	resp.Diagnostics.Append(diags...)
 	if resp.Diagnostics.HasError() {
+		return
+	}
+	if !found {
+		resp.Diagnostics.AddError(
+			"Unable to find repository action secret by name",
+			fmt.Sprintf(
+				"Action secret with owner '%s' repo '%s' and name '%s' not found",
+				repo.Owner.ValueString(),
+				repo.Name.ValueString(),
+				data.Name.ValueString(),
+			),
+		)
+
 		return
 	}
 
@@ -255,7 +268,7 @@ func (r *repositoryActionSecretResource) Read(ctx context.Context, req resource.
 	}
 
 	// Use Forgejo client to get repository
-	rep, diags := getRepositoryByID(
+	rep, found, diags := lookupRepositoryByID(
 		ctx,
 		r.client,
 		data.RepositoryID.ValueInt64(),
@@ -265,11 +278,18 @@ func (r *repositoryActionSecretResource) Read(ctx context.Context, req resource.
 		return
 	}
 
+	// The repository is gone, so is the secret. Drop it from state.
+	if !found {
+		resp.State.RemoveResource(ctx)
+
+		return
+	}
+
 	// Map response body to model
 	repo.from(rep)
 
 	// Use Forgejo client to get repository action secret
-	secret, diags := r.getSecret(
+	secret, found, diags := r.lookupSecret(
 		ctx,
 		repo.Owner.ValueString(),
 		repo.Name.ValueString(),
@@ -277,6 +297,13 @@ func (r *repositoryActionSecretResource) Read(ctx context.Context, req resource.
 	)
 	resp.Diagnostics.Append(diags...)
 	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	// Gone. Drop it from state, the next plan creates it again.
+	if !found {
+		resp.State.RemoveResource(ctx)
+
 		return
 	}
 
@@ -402,13 +429,18 @@ func (r *repositoryActionSecretResource) Delete(ctx context.Context, req resourc
 	}
 
 	// Use Forgejo client to get repository
-	rep, diags := getRepositoryByID(
+	rep, found, diags := lookupRepositoryByID(
 		ctx,
 		r.client,
 		data.RepositoryID.ValueInt64(),
 	)
 	resp.Diagnostics.Append(diags...)
 	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	// The repository is gone, so is the secret.
+	if !found {
 		return
 	}
 
@@ -427,6 +459,12 @@ func (r *repositoryActionSecretResource) Delete(ctx context.Context, req resourc
 		repo.Name.ValueString(),
 		data.Name.ValueString(),
 	)
+
+	// Already gone, nothing to delete.
+	if isNotFound(res) {
+		return
+	}
+
 	if err != nil {
 		var msg string
 		if res == nil {
@@ -439,14 +477,6 @@ func (r *repositoryActionSecretResource) Delete(ctx context.Context, req resourc
 			switch res.StatusCode {
 			case 400:
 				msg = fmt.Sprintf("Bad request: %s", err)
-			case 404:
-				msg = fmt.Sprintf(
-					"Action secret with owner %s, repo %s and name %s not found: %s",
-					repo.Owner.String(),
-					repo.Name.String(),
-					data.Name.String(),
-					err,
-				)
 			default:
 				msg = fmt.Sprintf(
 					"Unknown error (status %d): %s",
@@ -466,8 +496,11 @@ func NewRepositoryActionSecretResource() resource.Resource {
 	return &repositoryActionSecretResource{}
 }
 
-// getSecret returns the secret with the given name from the repository.
-func (r *repositoryActionSecretResource) getSecret(ctx context.Context, owner, repo, name string) (*forgejo.Secret, diag.Diagnostics) {
+// lookupSecret returns the secret with the given name from the repository.
+// There is no API to read a single secret, so the repository's secrets are
+// listed and searched. A secret that is not in the list is found == false, not
+// an error.
+func (r *repositoryActionSecretResource) lookupSecret(ctx context.Context, owner, repo, name string) (*forgejo.Secret, bool, diag.Diagnostics) {
 	var diags diag.Diagnostics
 
 	tflog.Info(ctx, "List repository action secrets", map[string]any{
@@ -476,11 +509,12 @@ func (r *repositoryActionSecretResource) getSecret(ctx context.Context, owner, r
 		"name":  name,
 	})
 
-	// Page through all secrets explicitly: ListOptions{Page: -1} only returns
-	// the server's default first page (~30), so a secret past page 1 would be
-	// missed and Read would fail with "not found" for a secret that exists.
+	// Page through all secrets. Page: -1 only returns the server's default
+	// first page, and a secret missing from an incomplete listing would read
+	// as deleted here.
 	const pageSize = 50
 	for page := 1; ; page++ {
+		// Use Forgejo client to list repository action secrets
 		secrets, res, err := r.client.ListRepoActionSecret(
 			owner,
 			repo,
@@ -492,6 +526,12 @@ func (r *repositoryActionSecretResource) getSecret(ctx context.Context, owner, r
 			},
 		)
 		if err != nil {
+			// A deleted repository takes its secrets with it, so the 404 the
+			// API returns in that case means gone here too.
+			if isNotFound(res) {
+				return nil, false, diags
+			}
+
 			var msg string
 			if res == nil {
 				msg = fmt.Sprintf("Unknown error with nil response: %s", err)
@@ -500,51 +540,29 @@ func (r *repositoryActionSecretResource) getSecret(ctx context.Context, owner, r
 					"status": res.Status,
 				})
 
-				switch res.StatusCode {
-				case 404:
-					msg = fmt.Sprintf(
-						"Action secrets with owner '%s' and repo '%s' not found: %s",
-						owner,
-						repo,
-						err,
-					)
-				default:
-					msg = fmt.Sprintf(
-						"Unknown error (status %d): %s",
-						res.StatusCode,
-						err,
-					)
-				}
+				msg = fmt.Sprintf(
+					"Unknown error (status %d): %s",
+					res.StatusCode,
+					err,
+				)
 			}
 			diags.AddError("Unable to list repository action secrets", msg)
 
-			return nil, diags
+			return nil, false, diags
 		}
 
-		// Search this page for a repository action secret with the given name.
+		// Search this page for repository action secrets with given name
 		idx := slices.IndexFunc(secrets, func(s *forgejo.Secret) bool {
 			return strings.EqualFold(s.Name, name)
 		})
 		if idx != -1 {
-			return secrets[idx], diags
+			return secrets[idx], true, diags
 		}
 
 		// Only an empty page proves this was the last page. The server caps
 		// the page size at MAX_RESPONSE_ITEMS, so a short page is no proof.
 		if len(secrets) == 0 {
-			break
+			return nil, false, diags
 		}
 	}
-
-	diags.AddError(
-		"Unable to find repository action secret by name",
-		fmt.Sprintf(
-			"Action secret with owner '%s' repo '%s' and name '%s' not found",
-			owner,
-			repo,
-			name,
-		),
-	)
-
-	return nil, diags
 }
